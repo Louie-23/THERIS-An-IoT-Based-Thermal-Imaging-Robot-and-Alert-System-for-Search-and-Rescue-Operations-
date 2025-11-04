@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>THERIS</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet-rotatedmarker/leaflet.rotatedMarker.js"></script>
+
+
+    <script>
+        let map;
+        const defaultLat = 14.599419;
+        const defaultLng = 121.001782;
+
+        window.onload = function () {
+            updateTempBtn();
+            fetch('/get_palette_state')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('palette-name').innerText = "Palette: " + data.palette;
+                    if (data.palette === "Grayscale") {
+                        document.getElementById('isotherm-btn').style.display = "";
+                        isIsotherm = data.isotherm;
+                        updateIsothermBtn();
+                    } else {
+                    document.getElementById('isotherm-btn').style.display = "none";
+                    }
+                });
+            map = L.map('map').setView([defaultLat, defaultLng], 18);
+  
+            // Satellite and OpenStreetMap layers
+            var satellite = L.tileLayer('https://api.maptiler.com/maps/hybrid/{z}/{x}/{y}.jpg?key=hxjzi8DmK4TpnUv0qPRn');
+            var openstreet = L.tileLayer('https://api.maptiler.com/maps/openstreetmap/{z}/{x}/{y}.jpg?key=hxjzi8DmK4TpnUv0qPRn');
+            var currentLayer = satellite.addTo(map);
+
+            document.getElementById('toggleMap').onclick = function () {
+                map.removeLayer(currentLayer);
+                if (currentLayer === satellite) {
+                    currentLayer = openstreet;
+                } else {
+                    currentLayer = satellite;
+                }
+                map.addLayer(currentLayer);
+            };
+
+            // Create a custom drone icon using the SVG
+            const droneIcon = L.icon({
+                iconUrl: '/static/drone-arrow.svg', // Flask static path!
+                iconSize: [40, 40],
+                iconAnchor: [20, 20], // Centered
+            });
+
+            // Place the marker and set initial yaw (heading)
+            let yaw = 0; // degrees, from your backend
+            let droneMarker = L.marker([defaultLat, defaultLng], {
+                icon: droneIcon,
+                rotationAngle: yaw,
+                rotationOrigin: 'center center'
+            }).addTo(map);
+
+
+            let dronePath = [];
+            let dronePolyline = null;
+            
+            // To update position/yaw:
+            window.updateDrone = function(lat, lng, yaw) {
+                droneMarker.setLatLng([lat, lng]);
+                droneMarker.setRotationAngle(yaw); // degrees, 0 = North
+                
+                 if (
+                    dronePath.length === 0 ||
+                    dronePath[dronePath.length - 1][0] !== lat ||
+                    dronePath[dronePath.length - 1][1] !== lng
+                ) {
+                    dronePath.push([lat, lng]);
+                    
+                    if (dronePath.length > 1000) dronePath.shift(); // remove this if want no limit in line
+                    
+                    if (dronePolyline) map.removeLayer(dronePolyline);
+                    dronePolyline = L.polyline(dronePath, { color: 'orange', weight: 4 }).addTo(map);
+                }
+            }
+            
+            
+            
+            let tempMarker = null;
+            let pinPopup = null;
+            const pinnedMarkers = []; // Store permanent markers
+
+            map.on('click', function(e) {
+                const lat = e.latlng.lat.toFixed(6);
+                const lng = e.latlng.lng.toFixed(6);
+
+                // Remove previous temp marker and popup
+                if (tempMarker) {
+                    map.removeLayer(tempMarker);
+                }
+
+                tempMarker = L.marker([lat, lng]).addTo(map);
+
+                // Create popup content
+                const popupContent = `
+                    <div>
+                        <b>Coordinates:</b><br>
+                        ${lat}, ${lng}<br>
+                        <button id="pinBtn" class="btn-red">Pin</button>
+                        <button id="copyBtn">Copy</button>
+                    </div>
+                `;
+
+                tempMarker.bindPopup(popupContent).openPopup();
+
+                // Remove marker if popup is closed (X button clicked)
+                tempMarker.on("popupclose", function() {
+                    if (tempMarker) {
+                        map.removeLayer(tempMarker);
+                        tempMarker = null;
+                    }
+                });
+
+                setTimeout(() => {
+                    document.getElementById('copyBtn').onclick = function() {
+                    // Instead of copying to clipboard, set the input values:
+                        document.getElementById('coordinates-latitude').value = lat;
+                        document.getElementById('coordinates-longitude').value = lng;
+                    // Optionally, focus the "Go" button or field
+                        document.querySelector('.coordinates-btn').focus();
+                    };
+                    document.getElementById('pinBtn').onclick = function() {
+                        // Create a permanent marker
+                        const permanentMarker = L.marker([lat, lng]).addTo(map);
+
+                        // Store in array for management
+                        pinnedMarkers.push(permanentMarker);
+
+                        // Bind popup for the permanent marker
+                        permanentMarker.bindPopup(`
+                            <div>
+                                <b>Coordinates:</b><br>
+                                ${lat}, ${lng}<br>
+                                <button class="copyPinnedBtn">Copy</button>
+                                <button class="removePinnedBtn btn-red">Remove</button>
+                            </div>
+                        `);
+
+                        // When marker is clicked, open popup and add listeners
+                        permanentMarker.on('click', function() {
+                            permanentMarker.openPopup();
+                            setTimeout(() => {
+                                permanentMarker.getPopup().getElement().querySelector('.copyPinnedBtn').onclick = function(e) {
+                                    e.stopPropagation();
+                                    document.getElementById('coordinates-latitude').value = lat;
+                                    document.getElementById('coordinates-longitude').value = lng;
+                                    document.querySelector('.coordinates-btn').focus();
+                                };
+                                permanentMarker.getPopup().getElement().querySelector('.removePinnedBtn').onclick = function(e) {
+                                    e.stopPropagation();
+                                    map.removeLayer(permanentMarker);
+                                };
+                            }, 100);
+                        });
+
+                        // Immediately open popup and attach listeners
+                        permanentMarker.openPopup();
+                        setTimeout(() => {
+                            permanentMarker.getPopup().getElement().querySelector('.copyPinnedBtn').onclick = function(e) {
+                                e.stopPropagation();
+                                navigator.clipboard.writeText(`${lat}, ${lng}`);
+                                alert('Copied!');
+                            };
+                            permanentMarker.getPopup().getElement().querySelector('.removePinnedBtn').onclick = function(e) {
+                                e.stopPropagation();
+                                map.removeLayer(permanentMarker);
+                            };
+                        }, 100);
+
+                        // Remove the temp marker and popup
+                        map.removeLayer(tempMarker);
+                        tempMarker = null;
+                    };
+                }, 100);
+            });
+
+        }
+        
+        
+        function showLaunchPointOnMap() {
+            fetch('/home_position')
+                .then(res => res.json())
+                .then(data => {
+                    if (data.success) {
+                        const lat = data.lat;
+                        const lon = data.lon;
+                        L.marker([lat, lon], {
+                            icon: L.icon({
+                                iconUrl: 'home_icon.png',
+                                iconSize: [32, 32],
+                                iconAnchor: [16, 32]
+                            })
+                        }).addTo(map).bindPopup('Launch Point');
+                    }
+                });
+        }
+        
+        
+        
+        
+        
+        
+    
+        setInterval(() => {
+            fetch('/motion_status')
+                .then(res => res.json())
+                .then(data => {
+                    const container = document.querySelector('.video-container');
+                    const alertText = document.getElementById('motion-alert');
+
+                    if (data.motion) {
+                        container.classList.add('motion-detected');
+                        alertText.style.display = 'block';
+                    } else {
+                        container.classList.remove('motion-detected');
+                        alertText.style.display = 'none';
+                    }
+                });
+        }, 500);
+        
+        
+        
+    </script>
+</head>
+<body>
+    
+    <div class="title">GUIDED MODE</div>
+    
+    <div class="container">
+        
+        <div class="section left">
+            
+            <div class="connect-section">
+                <button id="connectBtn">Connect to Flight Controller</button>
+                <span id="connectStatus">Not connected</span>
+            </div>
+        
+            <div class="video-wrapper">
+                <div class="video-container">
+                    <img src="/video" alt="Live Video Stream">
+                    <button id="temp-btn" onclick="toggleTempOverlay()" >Temp</button>
+                    <button id="isotherm-btn" onclick="toggleIsotherm()" style="display:none;">Isotherm</button>
+                    <button id="palette-btn" onclick="changePalette()">Change</button>
+                    <span id="palette-name">Palette: Grayscale</span>
+                </div>
+            </div>
+
+            <div id="motion-alert">!Motion Detected. Please Check surroundings!</div>
+    
+            <div class="mode-section">
+                <h2 class="mode-title">Mode</h2>
+                    <div class="mode-buttons">
+                        <button class="mode-btn">Guided</button>
+                        <button class="mode-btn">Stabilize</button>
+                        <button class="mode-btn">Alt_Hold</button>
+                        <button class="mode-btn">Loiter</button>
+                        <button class="mode-btn">Land</button>
+                        <button class="mode-btn">RTL</button>
+                    </div>
+            </div>
+        </div>    
+
+  
+    <div class="section middle">
+        
+        <div class="param-arm-wrapper">
+            <div class="parameters">
+                <h3>Parameters</h3>
+                <p><strong>Mode:</strong> <span id="param-mode"></span></p>
+                <p><strong>Battery:</strong> <span id="param-battery"></span></p>
+                <p><strong>GPS:</strong> <span id="param-gps"></span></p>
+                <p><strong>Altitude:</strong> <span id="param-altitude"></span></p>
+                <p><strong>Vertical Speed:</strong> <span id="param-vertical"></span></p>
+                <p><strong>Ground Speed:</strong> <span id="param-ground"></span></p>
+                <p><strong>Microwave Sensor:</strong> <span id="param-microwave"></span></p>
+            </div>
+        </div>
+    
+        <div class="arm-buttons">
+            <button class="arm-btn armed" id="armBtn">Arm</button>
+            <button class="arm-btn disarmed" id="disarmBtn">Disarm</button>
+        </div>
+    
+        <div class="takeoff-section" id="takeoff-section">
+            <label for="takeoff-altitude" class="takeoff-label"><strong>Takeoff:</strong></label>
+            <input type="number" id="takeoff-altitude" class="takeoff-input" placeholder="Enter altitude (m)">
+            <button class="takeoff-btn">Go</button>
+        </div>
+    
+    
+        <div class="coordinates-section"  id="coordinate-section">
+        
+            <div class="coordinate-input-group">
+                <label for="coordinates-latitude" class="coordinate-label"><strong>Lat:</strong></label>
+                <input type="number" id="coordinates-latitude" class="coordinate-input" placeholder="Enter Latitude">
+            </div>
+    
+            <div class="longitude-and-button">
+                <div class="coordinate-input-group">
+                    <label for="coordinates-longitude" class="coordinate-label"><strong>Lon:</strong></label>
+                    <input type="number" id="coordinates-longitude" class="coordinate-input" placeholder="Enter Longitude">
+                </div>
+                <button class="coordinates-btn">Go</button>
+            </div>
+        
+            <div class="coordinate-input-group">
+                <label for="coordinates-altitude" class="coordinate-label"><strong>Alt:</strong></label>
+                <input type="number" id="coordinates-altitude" class="coordinate-input" placeholder="Enter Altitude">
+            </div>
+        </div>
+    </div>
+    
+    
+    <div class="section right">
+        
+        <div class="map-wrapper">
+            <div class="map-container">
+                <div id="map"></div>
+                    <button id="toggleMap" class="map-toggle-button">Switch Map</button>
+            </div>
+        </div>
+    
+        <div class="status-log-wrapper">
+            <div id="status-log">
+                <div class="status-log-header">Status Log</div>
+                    <div class="status-log-messages" id="statusMessages"></div>
+            </div>
+        </div>
+</div>
+
+<script>
+        const armBtn = document.getElementById('armBtn');
+        const status = document.getElementById('statusMessages');
+
+        armBtn.addEventListener('click', () => {
+            fetch('/arm', { method: 'POST' })
+                .then(response => response.text())
+                .then(text => {
+                    logStatus(text);
+                })
+                .catch(error => {
+                    logStatus('Error: ' + error);
+                });
+        });
+        
+        
+        const disarmBtn = document.getElementById('disarmBtn');
+
+        disarmBtn.addEventListener('click', () => {
+            fetch('/disarm', { method: 'POST' })
+                .then(response => response.text())
+                .then(text => {
+                    logStatus(text);
+                })
+                .catch(error => {
+                    logStatus('Error: ' + error);
+                });
+        });
+        
+        
+        const connectBtn = document.getElementById('connectBtn');
+        const connectStatus = document.getElementById('connectStatus');
+
+        function updateConnectButton(isConnected) {
+            if (isConnected) {
+                connectBtn.innerText = "Disconnect";
+                connectBtn.classList.add('connected');
+                connectBtn.disabled = false;
+                connectStatus.innerText = "Connected";
+            } else {
+                connectBtn.innerText = "Connect to Flight Controller";
+                connectBtn.classList.remove('connected');
+                connectBtn.disabled = false;
+                connectStatus.innerText = "Not connected";
+            }
+        }
+
+        function checkConnectionStatus() {
+            fetch('/connection_status')
+                .then(res => res.json())
+                .then(data => {
+                    updateConnectButton(data.connected);
+                });
+        }
+
+        setInterval(checkConnectionStatus, 30000); // 30 seconds connecting
+        checkConnectionStatus();
+
+        connectBtn.addEventListener('click', () => {
+            if (connectBtn.innerText === "Connect to Flight Controller") {
+                connectBtn.disabled = true;
+                connectStatus.innerText = "Connecting...";
+                logStatus("Connecting to Flight Controller...");
+                fetch('/connect', { method: 'POST' })
+                    .then(res => res.json())
+                    .then(data => {
+                        if(data.status === "connected" || data.status === "already_connected") {
+                            updateConnectButton(true);
+                            logStatus("Flight Controller connected.");
+                        } else {
+                            updateConnectButton(false);
+                            connectStatus.innerText = "Error: " + (data.message || "Failed");
+                            logStatus("Flight Controller connection failed: " + (data.message || "Unknown error"));
+                        }
+                    })
+                    .catch(() => {
+                        updateConnectButton(false);
+                        connectStatus.innerText = "Error connecting";
+                        logStatus("Flight Controller connection failed: Network error.");
+                    });
+            } else if (connectBtn.innerText === "Disconnect") {
+                connectBtn.disabled = true;
+                connectStatus.innerText = "Disconnecting...";
+                logStatus("Disconnecting from Flight Controller...");
+                fetch('/disconnect', { method: 'POST' })
+                    .then(res => res.json())
+                    .then(data => {
+                        if(data.status === "disconnected" || data.status === "already_disconnected") {
+                            updateConnectButton(false);
+                            logStatus("Flight Controller disconnected.");
+                        } else {
+                            updateConnectButton(true);
+                            connectStatus.innerText = "Error: " + (data.message || "Failed");
+                            logStatus("Flight Controller disconnect failed: " + (data.message || "Unknown error"));
+                        }
+                    })
+                    .catch(() => {
+                        updateConnectButton(true);
+                        connectStatus.innerText = "Error disconnecting";
+                        logStatus("Flight Controller disconnect failed: Network error.");
+                    });
+            }
+        });
+        
+        function logStatus(message) {
+            const statusDiv = document.getElementById('statusMessages');
+            statusDiv.innerHTML += message + '<br>';
+            statusDiv.scrollTop = statusDiv.scrollHeight;
+        }
+        
+        function updateArmDisarmButtons(armed) {
+            const armBtn = document.getElementById('armBtn');
+            const disarmBtn = document.getElementById('disarmBtn');
+            if (armed) {
+                armBtn.innerText = "Armed";
+                armBtn.classList.add('green');
+                armBtn.classList.remove('red');
+                disarmBtn.innerText = "Disarm";
+                disarmBtn.classList.add('red');
+                disarmBtn.classList.remove('green');
+            } else {
+                armBtn.innerText = "Arm";
+                armBtn.classList.add('red');
+                armBtn.classList.remove('green');
+                disarmBtn.innerText = "Disarmed";
+                disarmBtn.classList.add('green');
+                disarmBtn.classList.remove('red');
+            }
+        }
+        
+        function setSectionEnabled(sectionId, enabled) {
+            const section = document.getElementById(sectionId);
+            if (!section) return;
+            // Set disabled for all inputs/buttons inside the section
+            Array.from(section.querySelectorAll('input, button, select, textarea')).forEach(el => {
+                el.disabled = !enabled;
+            });
+            // Optionally, visually grey out the section
+            section.style.opacity = enabled ? '1' : '0.5';
+            section.style.pointerEvents = enabled ? 'auto' : 'none';
+        }
+
+        let lastMotionStatus = false;
+
+        function pollDroneStatus() {
+            fetch('/status')
+                .then(res => res.json())
+                .then(data => {
+                    if (data.connected) {
+                        document.getElementById('param-mode').innerText = data.mode;
+                        document.getElementById('param-battery').innerText = data.battery;
+                        document.getElementById('param-gps').innerText = data.gps;
+                        document.getElementById('param-altitude').innerText = data.altitude + " meters";
+                        document.getElementById('param-ground').innerText = data.ground_speed ? data.ground_speed + " m/s" : 'N/A';
+                        document.getElementById('param-vertical').innerText = data.vertical_speed ? data.vertical_speed + " m/s" : 'N/A';
+                        updateArmDisarmButtons(data.armed);
+                    } else {
+                        document.getElementById('param-mode').innerText = 'Not Connected';
+                        document.getElementById('param-battery').innerText = 'N/A';
+                        document.getElementById('param-gps').innerText = 'N/A';
+                        document.getElementById('param-altitude').innerText = '0 meters';
+                        document.getElementById('param-ground').innerText = '0 m/s';
+                        document.getElementById('param-vertical').innerText = '0 m/s';
+                        updateArmDisarmButtons(false);
+                    }
+
+                    // --- Microwave/motion logic: always check, regardless of connection
+                    if ('motion' in data) {
+                        if (data.motion) {
+                            document.getElementById('param-microwave').innerText = 'Movement Detected!';
+                            document.getElementById('param-microwave').style.color = 'red';
+                            if (!lastMotionStatus) {
+                                logStatus("Movement Detected!");
+                            }
+                        } else {
+                            document.getElementById('param-microwave').innerText = 'No movement';
+                            document.getElementById('param-microwave').style.color = 'green';
+                        }
+                        lastMotionStatus = !!data.motion;
+                    } else {
+                        document.getElementById('param-microwave').innerText = 'No movement';
+                        document.getElementById('param-microwave').style.color = 'green';
+                        lastMotionStatus = false;
+                    }
+
+                    if (data.connected) {
+                        updateModeButtons(data.mode);
+                    } else {
+                        updateModeButtons(""); // No mode selected if disconnected
+                    }
+
+                    if (data.connected) {
+                        // Use real position and yaw if available
+                        const lat = data.lat || 14.599419;
+                        const lng = data.lng || 121.001782;
+                        const yaw = data.yaw || 0;
+                        updateDrone(lat, lng, yaw);
+                    } else {
+                        // If not connected, show default position and yaw
+                        updateDrone(14.599419, 121.001782, 0);
+                    }
+
+                    const isGuided = data.mode && data.mode.toUpperCase() === 'GUIDED';
+                    setSectionEnabled('takeoff-section', isGuided);
+                    setSectionEnabled('coordinate-section', isGuided);
+                });
+        }
+
+setInterval(pollDroneStatus, 500); // Every 0.5 second
+pollDroneStatus();
+        
+        
+        
+        
+        function setMode(mode) {
+            fetch('/set_mode', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({mode: mode})
+            })
+            .then(res => res.json())
+            .then(data => {
+                logStatus(data.message);
+                // Optionally, immediately update buttons, but relying on pollDroneStatus is more robust
+            });
+        }
+
+        // Update button colors in your pollDroneStatus() function:
+        function updateModeButtons(currentMode) {
+            document.querySelectorAll('.mode-btn').forEach(btn => {
+                if (btn.innerText.toLowerCase() === currentMode.toLowerCase()) {
+                    btn.classList.add('green');
+                } else {
+                    btn.classList.remove('green');
+                }
+            });
+        }
+        
+        const modeMap = {
+            "Guided": "GUIDED",
+            "Stabilize": "STABILIZE",
+            "Alt_Hold": "ALT_HOLD",
+            "Loiter": "LOITER",
+            "Land": "LAND",
+            "RTL": "RTL"
+        };
+
+        document.querySelectorAll('.mode-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                setMode(modeMap[this.innerText] || this.innerText);
+            });
+        });
+        
+        
+        document.querySelector('.takeoff-btn').onclick = function() {
+            const alt = parseFloat(document.getElementById('takeoff-altitude').value);
+            if (isNaN(alt) || alt <= 0) {
+                logStatus('Please enter a valid takeoff altitude in meters!');
+                return;
+            }
+            logStatus('Sending takeoff command ...');
+            fetch('/takeoff', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ altitude: alt })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    logStatus(`Takeoff command sent! Target altitude: ${alt} meters.`);
+                } else {
+                    logStatus('Takeoff failed: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                logStatus('Error communicating with server: ' + err);
+            });
+        };
+        
+        
+        function pasteCoordinates(lat, lon) {
+            document.getElementById('coordinates-latitude').value = lat;
+            document.getElementById('coordinates-longitude').value = lon;
+            document.getElementById('coordinates-altitude').focus(); // Focus for quick hand entry
+        }
+        
+        let gotoTarget = null;
+
+        document.querySelector('.coordinates-btn').onclick = function() {
+            const lat = parseFloat(document.getElementById('coordinates-latitude').value);
+            const lon = parseFloat(document.getElementById('coordinates-longitude').value);
+            const alt = parseFloat(document.getElementById('coordinates-altitude').value);
+
+            if (isNaN(lat) || isNaN(lon) || isNaN(alt)) {
+                logStatus('Please enter valid latitude, longitude, and altitude!');
+                return;
+            }
+            logStatus(`Sending fly-to command: Lat=${lat}, Lon=${lon}, Alt=${alt}`);
+
+            fetch('/goto', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    latitude: lat,
+                    longitude: lon,
+                    altitude: alt
+                })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    logStatus('Flying to the specified coordinate...');
+                } else {
+                    logStatus('Fly-to failed: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                logStatus('Error communicating with server: ' + err);
+            });
+            gotoTarget = {lat, lon, alt};
+        };
+        
+        let lastPosition = {};
+        setInterval(() => {
+            fetch('/position')
+            .then(res => res.json())
+            .then(data => {
+                if(data.success) {
+                    const {latitude, longitude, altitude} = data;
+                    if (gotoTarget) {
+                        // Compute distance to target
+                        const dist = Math.sqrt(
+                            Math.pow(latitude - gotoTarget.lat, 2) +
+                            Math.pow(longitude - gotoTarget.lon, 2) +
+                            Math.pow(altitude - gotoTarget.alt, 2)
+                        );
+                        if (dist < 0.00005) { // ~5 meters, adjust as needed
+                            logStatus("Destination reached!");
+                            gotoTarget = null; // Only notify once
+                        }
+                    }
+                }
+            });
+        }, 2000);
+        
+        function changePalette() {
+            fetch('/change_palette', {method: 'POST'})
+                .then(response => response.json())
+                .then(data => {
+                    if (data.palette) {
+                        document.getElementById('palette-name').innerText = "Palette: " + data.palette;
+                    }
+                });
+        }
+        
+        let isIsotherm = false;
+
+        function changePalette() {
+            fetch('/change_palette', {method: 'POST'})
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('palette-name').innerText = "Palette: " + data.palette;
+                    // Show/hide isotherm button
+                    if (data.palette === "Grayscale") {
+                        document.getElementById('isotherm-btn').style.display = "";
+                        isIsotherm = data.isotherm;
+                        updateIsothermBtn();
+                    } else {
+                        document.getElementById('isotherm-btn').style.display = "none";
+                    }
+                });
+        }
+
+        function toggleIsotherm() {
+            fetch('/toggle_isotherm', {method: 'POST'})
+            .then(response => response.json())
+                .then(data => {
+                    isIsotherm = data.isotherm;
+                    updateIsothermBtn();
+                });
+        }
+        function updateIsothermBtn() {
+            document.getElementById('isotherm-btn').innerText = isIsotherm ? "Isotherm ON" : "Isotherm OFF";
+        }
+        
+        let tempEnabled = false;
+
+        function toggleTempOverlay() {
+            fetch('/toggle_temp_overlay', {method: 'POST'})
+                .then(response => response.json())
+                .then(data => {
+                    tempEnabled = data.temp_enabled;
+                    updateTempBtn();
+                });
+        }
+        function updateTempBtn() {
+        document.getElementById('temp-btn').innerText = tempEnabled ? "Temp ON" : "Temp OFF";
+        }
+
+
+
+</script>
+
+</body>
+</html>
